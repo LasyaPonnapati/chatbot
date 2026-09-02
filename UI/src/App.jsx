@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 function consumeSse(buffer, onDelta) {
   let sep;
@@ -172,19 +174,30 @@ export default function App() {
       ) : (
         <>
           <div className="thread" ref={threadRef}>
-            {messages.map((msg, i) => (
-              <div key={i} className={`msg ${msg.role}`}>
-                <div className="bubble">{msg.content || (streaming && i === messages.length - 1 ? "…" : "")}</div>
-              </div>
-            ))}
-          </div>
-          <div className="dock">
-            <Composer
-              value={question}
-              onChange={setQuestion}
-              onSubmit={handleSubmit}
-              disabled={streaming}
-            />
+            <div className="thread-inner">
+              {messages.map((msg, i) => {
+                const text = msg.content || (streaming && i === messages.length - 1 ? "…" : "");
+                return (
+                  <div key={i} className={`msg ${msg.role}`}>
+                    <div className="bubble">
+                      {msg.role === "assistant" && text && text !== "…" ? (
+                        <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+                      ) : (
+                        text
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="dock">
+              <Composer
+                value={question}
+                onChange={setQuestion}
+                onSubmit={handleSubmit}
+                disabled={streaming}
+              />
+            </div>
           </div>
         </>
       )}
