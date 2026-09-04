@@ -8,6 +8,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/chat": "http://127.0.0.1:8000",
+      "/chats": "http://127.0.0.1:8000",
     },
   },
 });
