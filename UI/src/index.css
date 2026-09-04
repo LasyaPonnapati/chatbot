@@ -121,6 +121,11 @@ h1 {
   color: #ececec;
 }
 
+.msg.assistant .bubble.error {
+  color: #ff8b8b;
+  white-space: pre-wrap;
+}
+
 .msg.assistant .bubble > *:first-child {
   margin-top: 0;
 }
@@ -210,6 +215,23 @@ h1 {
 
 .msg.assistant .bubble th {
   background: #1a1a1a;
+}
+
+.msg.assistant .bubble img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.msg.assistant .bubble hr {
+  border: 0;
+  border-top: 1px solid #3a3a3a;
+  margin: 16px 0;
+}
+
+.msg.assistant .bubble .contains-task-list {
+  list-style: none;
+  padding-left: 4px;
 }
 
 .dock {

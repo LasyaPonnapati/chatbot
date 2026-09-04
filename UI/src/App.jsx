@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import Markdown from "react-markdown";
+import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 function consumeSse(buffer, onDelta) {
@@ -17,11 +17,26 @@ function consumeSse(buffer, onDelta) {
   return buffer;
 }
 
-async function streamAnswer(question, onDelta, signal) {
+function lastContext(messages, maxTurns = 5) {
+  const turns = [];
+  for (let i = 0; i + 1 < messages.length; i += 2) {
+    const user = messages[i];
+    const assistant = messages[i + 1];
+    if (user?.role !== "user" || assistant?.role !== "assistant") continue;
+    if (!user.content || !assistant.content) continue;
+    turns.push(
+      { role: "user", content: user.content },
+      { role: "assistant", content: assistant.content },
+    );
+  }
+  return turns.slice(-maxTurns * 2);
+}
+
+async function streamAnswer(question, history, onDelta, signal) {
   const res = await fetch("/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, history }),
     signal,
   });
   if (!res.ok) {
@@ -125,6 +140,7 @@ export default function App() {
     const text = question.trim();
     if (!text || streaming) return;
 
+    const history = lastContext(messages);
     setQuestion("");
     setMessages((prev) => [...prev, { role: "user", content: text }, { role: "assistant", content: "" }]);
     setStreaming(true);
@@ -132,21 +148,39 @@ export default function App() {
     try {
       await streamAnswer(
         text,
+        history,
         (delta) => {
           setMessages((prev) => {
             const next = [...prev];
             const last = next[next.length - 1];
-            next[next.length - 1] = { ...last, content: last.content + delta };
+            if (delta && typeof delta === "object" && delta.error) {
+              next[next.length - 1] = { ...last, error: true, content: delta.error };
+            } else {
+              next[next.length - 1] = { ...last, content: last.content + delta };
+            }
             return next;
           });
         },
       );
+      setMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last?.role === "assistant" && !last.content) {
+          next[next.length - 1] = {
+            ...last,
+            error: true,
+            content: "Could not get a reply. The model returned no text.",
+          };
+        }
+        return next;
+      });
     } catch (err) {
       setMessages((prev) => {
         const next = [...prev];
         const last = next[next.length - 1];
         next[next.length - 1] = {
           ...last,
+          error: true,
           content: last.content || `Could not get a reply. ${err.message}`,
         };
         return next;
@@ -162,7 +196,7 @@ export default function App() {
     <div className={`app ${empty ? "landing" : "chat"}`}>
       {empty ? (
         <div className="hero">
-          <h1>What&apos;s on the agenda today?</h1>
+          <h1>How can I help you?</h1>
           <Composer
             value={question}
             onChange={setQuestion}
@@ -179,9 +213,9 @@ export default function App() {
                 const text = msg.content || (streaming && i === messages.length - 1 ? "…" : "");
                 return (
                   <div key={i} className={`msg ${msg.role}`}>
-                    <div className="bubble">
-                      {msg.role === "assistant" && text && text !== "…" ? (
-                        <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+                    <div className={`bubble${msg.error ? " error" : ""}`}>
+                      {msg.role === "assistant" && !msg.error && text && text !== "…" ? (
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
                       ) : (
                         text
                       )}
