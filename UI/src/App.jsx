@@ -17,27 +17,18 @@ function consumeSse(buffer, onDelta) {
   return buffer;
 }
 
-function lastContext(messages, maxTurns = 5) {
-  const turns = [];
-  for (let i = 0; i + 1 < messages.length; i += 2) {
-    const user = messages[i];
-    const assistant = messages[i + 1];
-    if (user?.role !== "user" || assistant?.role !== "assistant") continue;
-    if (!user.content || !assistant.content) continue;
-    turns.push(
-      { role: "user", content: user.content },
-      { role: "assistant", content: assistant.content },
-    );
-  }
-  return turns.slice(-maxTurns * 2);
+function chatIdFromPath() {
+  const match = window.location.pathname.match(/^\/c\/([^/]+)$/);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
-async function streamAnswer(question, history, onDelta, signal) {
+async function streamAnswer(question, chatId, onDelta) {
+  const body = { question };
+  if (chatId) body.chat_id = chatId;
   const res = await fetch("/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, history }),
-    signal,
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(`Request failed (${res.status})`);
@@ -53,6 +44,15 @@ async function streamAnswer(question, history, onDelta, signal) {
   }
   buffer += decoder.decode();
   consumeSse(buffer, onDelta);
+}
+
+function PanelIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M9.5 4.5v15" stroke="currentColor" strokeWidth="1.7" />
+    </svg>
+  );
 }
 
 function PlusIcon() {
@@ -127,41 +127,114 @@ function Composer({ value, onChange, onSubmit, disabled, autoFocus }) {
 export default function App() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
+  const [chats, setChats] = useState([]);
+  const [chatId, setChatId] = useState(() => chatIdFromPath());
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [streaming, setStreaming] = useState(false);
   const threadRef = useRef(null);
+  const streamingRef = useRef(false);
+
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
 
   useEffect(() => {
     const el = threadRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, streaming]);
 
+  useEffect(() => {
+    fetch("/chats")
+      .then((res) => (res.ok ? res.json() : []))
+      .then(setChats)
+      .catch(() => setChats([]));
+  }, []);
+
+  useEffect(() => {
+    async function loadFromPath() {
+      const id = chatIdFromPath();
+      setChatId(id);
+      if (!id) {
+        setMessages([]);
+        return;
+      }
+      const res = await fetch(`/chats/${id}`);
+      if (!res.ok) {
+        history.replaceState(null, "", "/");
+        setChatId(null);
+        setMessages([]);
+        return;
+      }
+      const data = await res.json();
+      setMessages(data.messages || []);
+    }
+
+    loadFromPath();
+    window.addEventListener("popstate", loadFromPath);
+    return () => window.removeEventListener("popstate", loadFromPath);
+  }, []);
+
+  function handleNewChat() {
+    if (streamingRef.current) return;
+    history.pushState(null, "", "/");
+    setChatId(null);
+    setMessages([]);
+  }
+
+  async function openChat(id) {
+    if (streamingRef.current || id === chatId) return;
+    history.pushState(null, "", `/c/${id}`);
+    setChatId(id);
+    const res = await fetch(`/chats/${id}`);
+    if (!res.ok) {
+      history.replaceState(null, "", "/");
+      setChatId(null);
+      setMessages([]);
+      return;
+    }
+    const data = await res.json();
+    setMessages(data.messages || []);
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     const text = question.trim();
     if (!text || streaming) return;
 
-    const history = lastContext(messages);
+    const currentId = chatId;
     setQuestion("");
     setMessages((prev) => [...prev, { role: "user", content: text }, { role: "assistant", content: "" }]);
     setStreaming(true);
 
     try {
-      await streamAnswer(
-        text,
-        history,
-        (delta) => {
-          setMessages((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (delta && typeof delta === "object" && delta.error) {
+      await streamAnswer(text, currentId, (delta) => {
+        if (delta && typeof delta === "object") {
+          if (delta.chat_id) {
+            setChatId(delta.chat_id);
+            history.replaceState(null, "", `/c/${delta.chat_id}`);
+            setChats((prev) => [
+              { id: delta.chat_id, title: delta.title },
+              ...prev.filter((c) => c.id !== delta.chat_id),
+            ]);
+            return;
+          }
+          if (delta.error) {
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
               next[next.length - 1] = { ...last, error: true, content: delta.error };
-            } else {
-              next[next.length - 1] = { ...last, content: last.content + delta };
-            }
-            return next;
-          });
-        },
-      );
+              return next;
+            });
+            return;
+          }
+        }
+        setMessages((prev) => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          next[next.length - 1] = { ...last, content: last.content + delta };
+          return next;
+        });
+      });
       setMessages((prev) => {
         const next = [...prev];
         const last = next[next.length - 1];
@@ -193,20 +266,57 @@ export default function App() {
   const empty = messages.length === 0;
 
   return (
-    <div className={`app ${empty ? "landing" : "chat"}`}>
-      {empty ? (
-        <div className="hero">
-          <h1>How can I help you?</h1>
-          <Composer
-            value={question}
-            onChange={setQuestion}
-            onSubmit={handleSubmit}
+    <div className="app">
+      <aside className={`sidebar${sidebarOpen ? "" : " collapsed"}`}>
+        <div className="sidebar-top">
+          <button
+            type="button"
+            className="new-chat"
+            onClick={handleNewChat}
             disabled={streaming}
-            autoFocus
-          />
+            aria-label="New chat"
+          >
+            <PlusIcon />
+            {sidebarOpen ? "New chat" : null}
+          </button>
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={() => setSidebarOpen((open) => !open)}
+            aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+          >
+            <PanelIcon />
+          </button>
         </div>
-      ) : (
-        <>
+        {sidebarOpen ? (
+          <div className="chat-list">
+            {chats.map((chat) => (
+              <button
+                key={chat.id}
+                type="button"
+                className={`chat-item${chat.id === chatId ? " active" : ""}`}
+                onClick={() => openChat(chat.id)}
+                disabled={streaming}
+              >
+                {chat.title}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </aside>
+      <div className={`main ${empty ? "landing" : "chat"}`}>
+        {empty ? (
+          <div className="hero">
+            <h1>How can I help you?</h1>
+            <Composer
+              value={question}
+              onChange={setQuestion}
+              onSubmit={handleSubmit}
+              disabled={streaming}
+              autoFocus
+            />
+          </div>
+        ) : (
           <div className="thread" ref={threadRef}>
             <div className="thread-inner">
               {messages.map((msg, i) => {
@@ -233,8 +343,8 @@ export default function App() {
               />
             </div>
           </div>
-        </>
-      )}
+        )}
+      </div>
     </div>
   );
 }
