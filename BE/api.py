@@ -13,12 +13,12 @@ from db import (
     create_chat,
     delete_chat,
     get_chat,
-    get_context,
     get_messages,
     init_db,
     list_chats,
     update_chat_title,
 )
+from summarize import build_llm_messages
 
 load_dotenv()
 init_db()
@@ -35,6 +35,13 @@ app.add_middleware(
 client = OpenAI(
     api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1",
+)
+
+SYSTEM_PROMPT = (
+    "You are a helpful assistant. Answer clearly and concisely. "
+    "Use markdown when it improves readability. "
+    "For math, use LaTeX: \\(inline\\) and \\[block\\]. "
+    "If you are unsure, say so instead of guessing."
 )
 
 
@@ -82,17 +89,13 @@ def stream_llm(
         yield _sse({"chat_id": created["id"], "title": created["title"]})
 
     if persist:
-        history = get_context(chat_id)
+        messages = build_llm_messages(client, chat_id, question, SYSTEM_PROMPT)
         add_message(chat_id, "user", question)
-        messages = [
-            {"role": m["role"], "content": m["content"]}
-            for m in history
-            if m["role"] in ("user", "assistant") and m["content"]
-        ]
     else:
-        messages = _client_context(client_history)
-
-    messages.append({"role": "user", "content": question})
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + _client_context(
+            client_history
+        )
+        messages.append({"role": "user", "content": question})
 
     collected = []
     try:
