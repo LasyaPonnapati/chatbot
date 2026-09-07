@@ -1,6 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
+
+function normalizeGrokMath(text) {
+  const chunks = text.split(/(```[\s\S]*?```)/);
+  return chunks
+    .map((chunk) => {
+      if (chunk.startsWith("```")) return chunk;
+      return chunk
+        .replace(/\\\[([\s\S]*?)\\\]/g, (_, body) => `\n$$\n${body.trim()}\n$$\n`)
+        .replace(/\\\(([\s\S]*?)\\\)/g, (_, body) => `$${body}$`);
+    })
+    .join("");
+}
 
 function consumeSse(buffer, onDelta) {
   let sep;
@@ -22,9 +37,18 @@ function chatIdFromPath() {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-async function streamAnswer(question, chatId, onDelta) {
+function temporaryFromPath() {
+  return window.location.pathname === "/temporary";
+}
+
+async function streamAnswer(question, chatId, onDelta, options = {}) {
   const body = { question };
-  if (chatId) body.chat_id = chatId;
+  if (options.temporary) {
+    body.temporary = true;
+    body.history = options.history || [];
+  } else if (chatId) {
+    body.chat_id = chatId;
+  }
   const res = await fetch("/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -60,6 +84,126 @@ function PlusIcon() {
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
+  );
+}
+
+function TempIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.25" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M12 7.5V12l3 2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function DotsIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="12" cy="5.5" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="12" cy="18.5" r="1.6" />
+    </svg>
+  );
+}
+
+function ChatItem({
+  chat,
+  active,
+  disabled,
+  menuOpen,
+  renaming,
+  onOpen,
+  onToggleMenu,
+  onCommitRename,
+  onCancelRename,
+}) {
+  const [draft, setDraft] = useState(chat.title);
+  const inputRef = useRef(null);
+  const skipBlur = useRef(false);
+
+  useEffect(() => {
+    if (!renaming) return;
+    skipBlur.current = false;
+    setDraft(chat.title);
+    const el = inputRef.current;
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  }, [renaming, chat.title]);
+
+  function commit() {
+    const next = draft.trim();
+    if (!next || next === chat.title) {
+      onCancelRename();
+      return;
+    }
+    onCommitRename(chat.id, next);
+  }
+
+  return (
+    <div
+      className={`chat-item-row${active ? " active" : ""}${menuOpen ? " menu-open" : ""}${renaming ? " renaming" : ""}`}
+    >
+      {renaming ? (
+        <input
+          ref={inputRef}
+          className="chat-item-rename"
+          value={draft}
+          maxLength={48}
+          disabled={disabled}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => {
+            if (skipBlur.current) return;
+            commit();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              skipBlur.current = false;
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              skipBlur.current = true;
+              onCancelRename();
+            }
+          }}
+        />
+      ) : (
+        <>
+          <button
+            type="button"
+            className="chat-item"
+            onClick={() => onOpen(chat.id)}
+            disabled={disabled}
+          >
+            {chat.title}
+          </button>
+          <button
+            type="button"
+            className="chat-item-menu-btn"
+            aria-label="Chat actions"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            disabled={disabled}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleMenu(chat.id, e.currentTarget);
+            }}
+          >
+            <DotsIcon />
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -129,14 +273,37 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [chats, setChats] = useState([]);
   const [chatId, setChatId] = useState(() => chatIdFromPath());
+  const [temporary, setTemporary] = useState(() => temporaryFromPath());
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [historyOpen, setHistoryOpen] = useState(true);
   const [streaming, setStreaming] = useState(false);
+  const [menu, setMenu] = useState(null);
+  const [renamingId, setRenamingId] = useState(null);
   const threadRef = useRef(null);
   const streamingRef = useRef(false);
+  const menuRef = useRef(null);
 
   useEffect(() => {
     streamingRef.current = streaming;
   }, [streaming]);
+
+  useEffect(() => {
+    if (!menu) return;
+    function onDoc(e) {
+      if (menuRef.current?.contains(e.target)) return;
+      if (e.target.closest?.(".chat-item-menu-btn")) return;
+      setMenu(null);
+    }
+    function onKey(e) {
+      if (e.key === "Escape") setMenu(null);
+    }
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   useEffect(() => {
     const el = threadRef.current;
@@ -152,9 +319,11 @@ export default function App() {
 
   useEffect(() => {
     async function loadFromPath() {
+      const isTemp = temporaryFromPath();
       const id = chatIdFromPath();
-      setChatId(id);
-      if (!id) {
+      setTemporary(isTemp);
+      setChatId(isTemp ? null : id);
+      if (isTemp || !id) {
         setMessages([]);
         return;
       }
@@ -162,6 +331,7 @@ export default function App() {
       if (!res.ok) {
         history.replaceState(null, "", "/");
         setChatId(null);
+        setTemporary(false);
         setMessages([]);
         return;
       }
@@ -177,23 +347,77 @@ export default function App() {
   function handleNewChat() {
     if (streamingRef.current) return;
     history.pushState(null, "", "/");
+    setTemporary(false);
+    setChatId(null);
+    setMessages([]);
+    setMenu(null);
+    setRenamingId(null);
+  }
+
+  function handleTemporaryChat() {
+    if (streamingRef.current) return;
+    history.pushState(null, "", "/temporary");
+    setTemporary(true);
     setChatId(null);
     setMessages([]);
   }
 
   async function openChat(id) {
-    if (streamingRef.current || id === chatId) return;
+    if (streamingRef.current || (!temporary && id === chatId)) return;
+    setMenu(null);
     history.pushState(null, "", `/c/${id}`);
+    setTemporary(false);
     setChatId(id);
     const res = await fetch(`/chats/${id}`);
     if (!res.ok) {
       history.replaceState(null, "", "/");
       setChatId(null);
+      setTemporary(false);
       setMessages([]);
       return;
     }
     const data = await res.json();
     setMessages(data.messages || []);
+  }
+
+  function toggleChatMenu(id, btn) {
+    if (streamingRef.current) return;
+    setMenu((prev) => {
+      if (prev?.id === id) return null;
+      const r = btn.getBoundingClientRect();
+      const width = 168;
+      return {
+        id,
+        top: r.bottom + 4,
+        left: Math.max(8, Math.min(r.right - width, window.innerWidth - width - 8)),
+      };
+    });
+  }
+
+  async function renameChat(id, title) {
+    const res = await fetch(`/chats/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setChats((prev) => prev.map((c) => (c.id === id ? { ...c, title: data.title } : c)));
+    }
+    setRenamingId(null);
+  }
+
+  async function deleteChat(id) {
+    setMenu(null);
+    const res = await fetch(`/chats/${id}`, { method: "DELETE" });
+    if (!res.ok) return;
+    setChats((prev) => prev.filter((c) => c.id !== id));
+    if (renamingId === id) setRenamingId(null);
+    if (!temporary && chatId === id) {
+      history.pushState(null, "", "/");
+      setChatId(null);
+      setMessages([]);
+    }
   }
 
   async function handleSubmit(e) {
@@ -202,6 +426,10 @@ export default function App() {
     if (!text || streaming) return;
 
     const currentId = chatId;
+    const isTemp = temporary;
+    const prior = messages
+      .filter((m) => (m.role === "user" || m.role === "assistant") && m.content)
+      .map((m) => ({ role: m.role, content: m.content }));
     setQuestion("");
     setMessages((prev) => [...prev, { role: "user", content: text }, { role: "assistant", content: "" }]);
     setStreaming(true);
@@ -210,12 +438,14 @@ export default function App() {
       await streamAnswer(text, currentId, (delta) => {
         if (delta && typeof delta === "object") {
           if (delta.chat_id) {
-            setChatId(delta.chat_id);
-            history.replaceState(null, "", `/c/${delta.chat_id}`);
-            setChats((prev) => [
-              { id: delta.chat_id, title: delta.title },
-              ...prev.filter((c) => c.id !== delta.chat_id),
-            ]);
+            if (!isTemp) {
+              setChatId(delta.chat_id);
+              history.replaceState(null, "", `/c/${delta.chat_id}`);
+              setChats((prev) => [
+                { id: delta.chat_id, title: delta.title },
+                ...prev.filter((c) => c.id !== delta.chat_id),
+              ]);
+            }
             return;
           }
           if (delta.error) {
@@ -234,7 +464,7 @@ export default function App() {
           next[next.length - 1] = { ...last, content: last.content + delta };
           return next;
         });
-      });
+      }, { temporary: isTemp, history: prior });
       setMessages((prev) => {
         const next = [...prev];
         const last = next[next.length - 1];
@@ -269,16 +499,29 @@ export default function App() {
     <div className="app">
       <aside className={`sidebar${sidebarOpen ? "" : " collapsed"}`}>
         <div className="sidebar-top">
-          <button
-            type="button"
-            className="new-chat"
-            onClick={handleNewChat}
-            disabled={streaming}
-            aria-label="New chat"
-          >
-            <PlusIcon />
-            {sidebarOpen ? "New chat" : null}
-          </button>
+          <div className="sidebar-actions">
+            <button
+              type="button"
+              className="new-chat"
+              onClick={handleNewChat}
+              disabled={streaming}
+              aria-label="New chat"
+            >
+              <PlusIcon />
+              {sidebarOpen ? "New chat" : null}
+            </button>
+            <button
+              type="button"
+              className="new-chat"
+              onClick={handleTemporaryChat}
+              disabled={streaming}
+              aria-label="Temporary chat"
+              aria-pressed={temporary}
+            >
+              <TempIcon />
+              {sidebarOpen ? "Temporary chat" : null}
+            </button>
+          </div>
           <button
             type="button"
             className="sidebar-toggle"
@@ -290,24 +533,47 @@ export default function App() {
         </div>
         {sidebarOpen ? (
           <div className="chat-list">
-            {chats.map((chat) => (
+            {chats.length > 0 ? (
               <button
-                key={chat.id}
                 type="button"
-                className={`chat-item${chat.id === chatId ? " active" : ""}`}
-                onClick={() => openChat(chat.id)}
-                disabled={streaming}
+                className={`chat-history-heading${historyOpen ? " open" : ""}`}
+                onClick={() => setHistoryOpen((open) => !open)}
+                aria-expanded={historyOpen}
               >
-                {chat.title}
+                Chat history
+                <ChevronIcon />
               </button>
-            ))}
+            ) : null}
+            {historyOpen ? (
+              <div className="chat-list-items">
+                {chats.map((chat) => (
+                  <ChatItem
+                    key={chat.id}
+                    chat={chat}
+                    active={!temporary && chat.id === chatId}
+                    disabled={streaming}
+                    menuOpen={menu?.id === chat.id}
+                    renaming={renamingId === chat.id}
+                    onOpen={openChat}
+                    onToggleMenu={toggleChatMenu}
+                    onCommitRename={renameChat}
+                    onCancelRename={() => setRenamingId(null)}
+                  />
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : null}
       </aside>
-      <div className={`main ${empty ? "landing" : "chat"}`}>
+      <div className={`main ${empty ? "landing" : "chat"}${temporary ? " temp-mode" : ""}`}>
+        {temporary ? (
+          <div className="temp-banner" role="status">
+            Temporary chat — not saved, and it disappears on refresh
+          </div>
+        ) : null}
         {empty ? (
           <div className="hero">
-            <h1>How can I help you?</h1>
+            <h1>{temporary ? "This chat won't be saved" : "How can I help you?"}</h1>
             <Composer
               value={question}
               onChange={setQuestion}
@@ -325,7 +591,12 @@ export default function App() {
                   <div key={i} className={`msg ${msg.role}`}>
                     <div className={`bubble${msg.error ? " error" : ""}`}>
                       {msg.role === "assistant" && !msg.error && text && text !== "…" ? (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkMath]}
+                          rehypePlugins={[rehypeKatex]}
+                        >
+                          {normalizeGrokMath(text)}
+                        </ReactMarkdown>
                       ) : (
                         text
                       )}
@@ -345,6 +616,33 @@ export default function App() {
           </div>
         )}
       </div>
+      {menu ? (
+        <div
+          ref={menuRef}
+          className="chat-item-menu"
+          role="menu"
+          style={{ top: menu.top, left: menu.left }}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setRenamingId(menu.id);
+              setMenu(null);
+            }}
+          >
+            Edit title
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="danger"
+            onClick={() => deleteChat(menu.id)}
+          >
+            Delete
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
