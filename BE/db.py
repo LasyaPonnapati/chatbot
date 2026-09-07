@@ -38,7 +38,7 @@ def init_db():
             );
             CREATE TABLE IF NOT EXISTS messages (
               id         INTEGER PRIMARY KEY AUTOINCREMENT,
-              chat_id    TEXT NOT NULL REFERENCES chats(id),
+              chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
               role       TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
               content    TEXT NOT NULL,
               created_at TEXT NOT NULL
@@ -136,5 +136,36 @@ def add_message(chat_id: str, role: str, content: str) -> None:
         )
         conn.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_chat(chat_id: str) -> bool:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT id FROM chats WHERE id = ?", (chat_id,)).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def update_chat_title(chat_id: str, title: str) -> dict | None:
+    now = _now()
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?",
+            (title, now, chat_id),
+        )
+        if cur.rowcount == 0:
+            return None
+        conn.commit()
+        row = conn.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+        return _row_chat(row)
     finally:
         conn.close()

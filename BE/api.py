@@ -4,18 +4,20 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from db import (
     add_message,
     chat_title,
     create_chat,
+    delete_chat,
     get_chat,
     get_context,
     get_messages,
     init_db,
     list_chats,
+    update_chat_title,
 )
 
 load_dotenv()
@@ -26,7 +28,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5000", "http://127.0.0.1:5000"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -40,26 +42,56 @@ class CreateChatRequest(BaseModel):
     question: str
 
 
+class UpdateChatRequest(BaseModel):
+    title: str
+
+
+class HistoryMessage(BaseModel):
+    role: str
+    content: str
+
+
 class ChatRequest(BaseModel):
     question: str
     chat_id: str | None = None
+    temporary: bool = False
+    history: list[HistoryMessage] | None = None
 
 
 def _sse(payload) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-def stream_llm(question: str, chat_id: str, created: dict | None):
+def _client_context(history: list[HistoryMessage] | None, max_turns: int = 5) -> list[dict]:
+    cleaned = [
+        {"role": m.role, "content": m.content}
+        for m in history or []
+        if m.role in ("user", "assistant") and m.content
+    ]
+    return cleaned[-(max_turns * 2) :]
+
+
+def stream_llm(
+    question: str,
+    chat_id: str | None = None,
+    created: dict | None = None,
+    persist: bool = True,
+    client_history: list[HistoryMessage] | None = None,
+):
     if created:
         yield _sse({"chat_id": created["id"], "title": created["title"]})
 
-    history = get_context(chat_id)
-    add_message(chat_id, "user", question)
-    messages = [
-        {"role": m["role"], "content": m["content"]}
-        for m in history
-        if m["role"] in ("user", "assistant") and m["content"]
-    ]
+    if persist:
+        history = get_context(chat_id)
+        add_message(chat_id, "user", question)
+        messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in history
+            if m["role"] in ("user", "assistant") and m["content"]
+        ]
+    else:
+        messages = _client_context(client_history)
+
     messages.append({"role": "user", "content": question})
 
     collected = []
@@ -82,11 +114,14 @@ def stream_llm(question: str, chat_id: str, created: dict | None):
                 yield _sse(text)
     except Exception as e:
         err = str(e)
-        add_message(chat_id, "assistant", err)
+        if persist:
+            add_message(chat_id, "assistant", err)
         yield _sse({"error": err})
         return
 
     full = "".join(collected)
+    if not persist:
+        return
     if full:
         add_message(chat_id, "assistant", full)
     else:
@@ -115,11 +150,39 @@ def get_chat_thread(chat_id: str):
     return {**chat, "messages": get_messages(chat_id)}
 
 
+@app.patch("/chats/{chat_id}")
+def patch_chat(chat_id: str, body: UpdateChatRequest):
+    title = chat_title(body.title)
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+    chat = update_chat_title(chat_id, title)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return chat
+
+
+@app.delete("/chats/{chat_id}")
+def remove_chat(chat_id: str):
+    if not delete_chat(chat_id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return Response(status_code=204)
+
+
 @app.post("/chat/stream")
 def chat_stream(body: ChatRequest):
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
+
+    if body.temporary:
+        return StreamingResponse(
+            stream_llm(
+                question,
+                persist=False,
+                client_history=body.history,
+            ),
+            media_type="text/event-stream",
+        )
 
     created = None
     if body.chat_id:
