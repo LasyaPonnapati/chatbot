@@ -46,18 +46,32 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id);
             """
         )
+        for stmt in (
+            "ALTER TABLE chats ADD COLUMN summary TEXT",
+            "ALTER TABLE chats ADD COLUMN summary_turn_count INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
     finally:
         conn.close()
 
 
 def _row_chat(row):
-    return {
+    data = {
         "id": row["id"],
         "title": row["title"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    keys = row.keys()
+    if "summary" in keys:
+        data["summary"] = row["summary"] or ""
+    if "summary_turn_count" in keys:
+        data["summary_turn_count"] = int(row["summary_turn_count"] or 0)
+    return data
 
 
 def create_chat(title: str) -> dict:
@@ -107,21 +121,14 @@ def get_messages(chat_id: str) -> list[dict]:
         conn.close()
 
 
-def get_context(chat_id: str, max_turns: int = 5) -> list[dict]:
+def update_chat_summary(chat_id: str, summary: str, summary_turn_count: int) -> None:
     conn = get_conn()
     try:
-        rows = conn.execute(
-            """
-            SELECT role, content FROM messages
-            WHERE chat_id = ? AND role IN ('user', 'assistant') AND content != ''
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (chat_id, max_turns * 2),
-        ).fetchall()
-        messages = [{"role": r["role"], "content": r["content"]} for r in rows]
-        messages.reverse()
-        return messages
+        conn.execute(
+            "UPDATE chats SET summary = ?, summary_turn_count = ? WHERE id = ?",
+            (summary, summary_turn_count, chat_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 
